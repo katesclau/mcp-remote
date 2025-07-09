@@ -550,12 +550,17 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
   const allowHttp = args.includes('--allow-http')
+  const useHttpLocal = args.includes('--http-local')
 
   // Check for debug flag
   const debug = args.includes('--debug')
   if (debug) {
     DEBUG = true
     log('Debug mode enabled - detailed logs will be written to ~/.mcp-auth/')
+  }
+
+  if (useHttpLocal) {
+    log('Using HTTP transport for local connections')
   }
 
   // Parse transport strategy
@@ -688,6 +693,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     transportStrategy,
     host,
     debug,
+    useHttpLocal,
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,

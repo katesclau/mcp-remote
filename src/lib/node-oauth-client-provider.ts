@@ -179,6 +179,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (DEBUG) debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
     try {
+      if (DEBUG) debugLog('Opening browser', { auth: this.authorizeResource, url: authorizationUrl })
       await open(sanitizeUrl(authorizationUrl.toString()))
       log('Browser opened automatically.')
     } catch (error) {
