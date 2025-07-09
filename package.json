@@ -36,7 +36,7 @@
     "strict-url-sanitise": "^0.0.1"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "https://pkg.pr.new/geelen/typescript-sdk/@modelcontextprotocol/sdk@877f4bf",
+    "@modelcontextprotocol/sdk": "git+https://github.com/katesclau/typescript-sdk.git#issues/744",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
     "prettier": "^3.5.3",

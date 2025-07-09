@@ -2,7 +2,7 @@
 
 /**
  * MCP Proxy with OAuth support
- * A bidirectional proxy between a local STDIO MCP server and a remote SSE server with OAuth authentication.
+ * A bidirectional proxy between a local MCP server and a remote SSE server with OAuth authentication.
  *
  * Run with: npx tsx proxy.ts https://example.remote/server [callback-port]
  *
@@ -11,6 +11,9 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { createServer } from 'http'
 import {
   connectToRemoteServer,
   log,
@@ -33,6 +36,7 @@ async function runProxy(
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
+  useHttpLocal: boolean,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authorizeResource: string,
@@ -57,11 +61,45 @@ async function runProxy(
     authorizeResource,
   })
 
-  // Create the STDIO transport for local connections
-  const localTransport = new StdioServerTransport()
+  // Create the appropriate transport for local connections
+  let localTransport: StdioServerTransport | StreamableHTTPServerTransport
+  let httpServer: any = null
+  const localPort = process.env.PORT ? parseInt(process.env.PORT) : 3000 // Port for HTTP server when using HTTP transport
 
-  // Keep track of the server instance for cleanup
+  if (useHttpLocal) {
+    // Use HTTP transport
+    localTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // Stateless mode
+    })
+
+    // Create HTTP server and bind to port
+    httpServer = createServer(async (req, res) => {
+      await (localTransport as StreamableHTTPServerTransport).handleRequest(req, res)
+    })
+  } else {
+    // Use STDIO transport (default)
+    localTransport = new StdioServerTransport()
+  }
+
+  // Create MCP server
+  const mcpServer = new Server({
+    name: 'mcp-remote-proxy',
+    version: '1.0.0',
+  }, {
+    capabilities: {
+      resources: {},
+      tools: {},
+      prompts: {},
+      logging: {},
+    },
+  })
+
+  // Connect server to transport
+  await mcpServer.connect(localTransport)
+  
+  // Keep track of the server instances for cleanup
   let server: any = null
+  let remoteTransport: any = null
 
   // Define an auth initializer function
   const authInitializer = async () => {
@@ -86,7 +124,7 @@ async function runProxy(
 
   try {
     // Connect to remote server with lazy authentication
-    const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
+    remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
@@ -94,16 +132,28 @@ async function runProxy(
       transportToServer: remoteTransport,
     })
 
-    // Start the local STDIO server
-    await localTransport.start()
-    log('Local STDIO server running')
-    log(`Proxy established successfully between local STDIO and remote ${remoteTransport.constructor.name}`)
-    log('Press Ctrl+C to exit')
+    if (useHttpLocal) {
+      // Start the HTTP server
+      httpServer.listen(localPort, () => {
+        log(`Local HTTP server running on port ${localPort}`)
+        log(`Proxy established successfully between local HTTP server and remote ${remoteTransport.constructor.name}`)
+        log('Press Ctrl+C to exit')
+      })
+    } else {
+      // Start the STDIO server
+      await localTransport.start()
+      log('Local STDIO server running')
+      log(`Proxy established successfully between local STDIO and remote ${remoteTransport.constructor.name}`)
+      log('Press Ctrl+C to exit')
+    }
 
     // Setup cleanup handler
     const cleanup = async () => {
       await remoteTransport.close()
       await localTransport.close()
+      if (httpServer) {
+        httpServer.close()
+      }
       // Only close the server if it was initialized
       if (server) {
         server.close()
@@ -143,7 +193,7 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 }
 
 // Parse command-line arguments and run the proxy
-parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
+parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug] [--http-local]')
   .then(
     ({
       serverUrl,
@@ -152,6 +202,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       transportStrategy,
       host,
       debug,
+      useHttpLocal,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authorizeResource,
@@ -162,6 +213,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         headers,
         transportStrategy,
         host,
+        useHttpLocal,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authorizeResource,
