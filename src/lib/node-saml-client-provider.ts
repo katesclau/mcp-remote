@@ -319,24 +319,21 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
       throw new Error('SAML provider not initialized')
     }
 
-    return new Promise((resolve, reject) => {
-      this.sp!.create_metadata((err: any, metadata: any) => {
-        if (err) {
-          reject(new Error(`Failed to generate SP metadata: ${err.message || err}`))
-          return
-        }
+    try {
+      const metadata = this.sp.create_metadata()
 
-        const spMetadata: SAML2SPMetadata = {
-          entityId: this.spEntityId,
-          acsUrl: this.acsUrl,
-          slsUrl: this.slsUrl,
-          metadataXml: metadata,
-          certificate: this.options.certificate
-        }
+      const spMetadata: SAML2SPMetadata = {
+        entityId: this.spEntityId,
+        acsUrl: this.acsUrl,
+        slsUrl: this.slsUrl,
+        metadataXml: metadata,
+        certificate: this.options.certificate
+      }
 
-        resolve(spMetadata)
-      })
-    })
+      return spMetadata
+    } catch (error) {
+      throw new Error(`Failed to generate SP metadata: ${(error as Error).message || error}`)
+    }
   }
 
   /**

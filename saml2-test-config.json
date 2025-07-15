@@ -1,0 +1,11 @@
+{
+  "spEntityId": "mcp-remote-saml-sp",
+  "idpMetadata": "http://localhost:9090/realms/mcp-rtlm/protocol/saml/descriptor",
+  "nameIdFormat": "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+  "signRequests": false,
+  "requireSignedAssertions": false,
+  "forceAuthn": false,
+  "allowIdpInitiated": true,
+  "certificate": "-----BEGIN CERTIFICATE-----\nMIICXjCCAcegAwIBAgIJAL...\n-----END CERTIFICATE-----",
+  "privateKey": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BA...\n-----END PRIVATE KEY-----"
+} 
