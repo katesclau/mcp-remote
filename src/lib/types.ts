@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { OAuthClientInformationFull, OAuthClientMetadata } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { SAML2ProviderOptions } from './saml-types.js'
 
 /**
  * Options for creating an OAuth client provider
@@ -43,6 +44,36 @@ export interface OAuthCallbackServerOptions {
   events: EventEmitter
 }
 
-// optional tatic OAuth client information
+// optional static OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
+
+/**
+ * Authentication provider options - can be OAuth or SAML2
+ */
+export interface AuthProviderOptions {
+  /** Authentication type */
+  authType: 'oauth' | 'saml2'
+  /** OAuth provider options (when authType is 'oauth') */
+  oauth?: OAuthProviderOptions
+  /** SAML2 provider options (when authType is 'saml2') */
+  saml2?: SAML2ProviderOptions
+}
+
+/**
+ * Unified authentication provider interface
+ */
+export interface UnifiedAuthProvider {
+  /** Get current access token/assertion for authorization */
+  getCurrentToken(): Promise<string | undefined>
+  /** Initialize authentication flow */
+  initializeAuth(): Promise<{ 
+    server: any; 
+    waitForAuth: () => Promise<string | { response: string; relayState?: string }>; 
+    skipBrowserAuth: boolean 
+  }>
+  /** Get authentication URL for browser redirect */
+  getAuthUrl?(relayState?: string): Promise<{ url: string; requestId: string }>
+  /** Process authentication response */
+  processAuthResponse?(responseData: string | { response: string; relayState?: string }): Promise<any>
+}

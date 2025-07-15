@@ -622,6 +622,44 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
+  // Parse authentication mode
+  let authMode: 'oauth' | 'saml2' = 'oauth' // Default to OAuth
+  const authModeIndex = args.indexOf('--auth-mode')
+  if (authModeIndex !== -1 && authModeIndex < args.length - 1) {
+    const mode = args[authModeIndex + 1].toLowerCase()
+    if (mode === 'oauth' || mode === 'saml2') {
+      authMode = mode as 'oauth' | 'saml2'
+      log(`Using authentication mode: ${authMode}`)
+    } else {
+      log(`Warning: Invalid auth mode '${mode}'. Valid values are: oauth, saml2. Using default: oauth`)
+    }
+  }
+
+  // Parse SAML2 configuration
+  let saml2Config: any = null
+  if (authMode === 'saml2') {
+    const saml2ConfigIndex = args.indexOf('--saml2-config')
+    if (saml2ConfigIndex !== -1 && saml2ConfigIndex < args.length - 1) {
+      const saml2ConfigArg = args[saml2ConfigIndex + 1]
+      try {
+        if (saml2ConfigArg.startsWith('@')) {
+          const filePath = saml2ConfigArg.slice(1)
+          saml2Config = JSON.parse(await readFile(filePath, 'utf8'))
+          log(`Using SAML2 configuration from file: ${filePath}`)
+        } else {
+          saml2Config = JSON.parse(saml2ConfigArg)
+          log(`Using SAML2 configuration from string`)
+        }
+      } catch (error) {
+        log(`Error parsing SAML2 configuration: ${error}`)
+        process.exit(1)
+      }
+    } else {
+      log('Error: --saml2-config is required when using --auth-mode saml2')
+      process.exit(1)
+    }
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -694,9 +732,11 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     host,
     debug,
     useHttpLocal,
+    authMode,
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    saml2Config,
   }
 }
 

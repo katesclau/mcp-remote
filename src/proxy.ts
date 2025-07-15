@@ -17,15 +17,20 @@ import { createServer } from 'http'
 import {
   connectToRemoteServer,
   log,
+  debugLog,
+  DEBUG,
   mcpProxy,
   parseCommandLineArgs,
   setupSignalHandlers,
   getServerUrlHash,
   TransportStrategy,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata, AuthProviderOptions } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
-import { createLazyAuthCoordinator } from './lib/coordination'
+import { NodeSAML2ClientProvider } from './lib/node-saml-client-provider'
+import { createLazyAuthCoordinator, createLazySAML2AuthCoordinator } from './lib/coordination'
+import { SAML2ProviderOptions } from './lib/saml-types'
+import { createAuthProvider } from './lib/auth-adapter'
 
 /**
  * Main function to run the proxy
@@ -37,9 +42,13 @@ async function runProxy(
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
   useHttpLocal: boolean,
-  staticOAuthClientMetadata: StaticOAuthClientMetadata,
-  staticOAuthClientInfo: StaticOAuthClientInformationFull,
-  authorizeResource: string,
+  authMode: 'oauth' | 'saml2' = 'oauth',
+  // OAuth options
+  staticOAuthClientMetadata?: StaticOAuthClientMetadata,
+  staticOAuthClientInfo?: StaticOAuthClientInformationFull,
+  authorizeResource?: string,
+  // SAML2 options
+  saml2Options?: SAML2ProviderOptions,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -47,19 +56,51 @@ async function runProxy(
   // Get the server URL hash for lockfile operations
   const serverUrlHash = getServerUrlHash(serverUrl)
 
-  // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
+  // Create auth coordinator and provider based on auth mode
+  let authCoordinator: any
+  let rawAuthProvider: any
+  let authProvider: any
 
-  // Create the OAuth client provider
-  const authProvider = new NodeOAuthClientProvider({
-    serverUrl,
-    callbackPort,
-    host,
-    clientName: 'MCP CLI Proxy',
-    staticOAuthClientMetadata,
-    staticOAuthClientInfo,
-    authorizeResource,
-  })
+  if (authMode === 'saml2') {
+    log('Using SAML2 authentication mode')
+    
+    if (!saml2Options) {
+      throw new Error('SAML2 options must be provided when using SAML2 authentication mode')
+    }
+
+    // Create SAML2 auth coordinator
+    authCoordinator = createLazySAML2AuthCoordinator(serverUrlHash, callbackPort, events)
+
+    // Create SAML2 client provider
+    rawAuthProvider = new NodeSAML2ClientProvider({
+      ...saml2Options,
+      serverUrl,
+      callbackPort,
+      host,
+    })
+
+    // Create adapter to make SAML2 provider compatible with OAuth interface
+    authProvider = createAuthProvider('saml2', undefined, rawAuthProvider)
+  } else {
+    log('Using OAuth authentication mode')
+    
+    // Create OAuth auth coordinator
+    authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
+
+    // Create OAuth client provider
+    rawAuthProvider = new NodeOAuthClientProvider({
+      serverUrl,
+      callbackPort,
+      host,
+      clientName: 'MCP CLI Proxy',
+      staticOAuthClientMetadata,
+      staticOAuthClientInfo,
+      authorizeResource,
+    })
+
+    // Use OAuth provider directly (no adapter needed)
+    authProvider = createAuthProvider('oauth', rawAuthProvider, undefined)
+  }
 
   // Create the appropriate transport for local connections
   let localTransport: StdioServerTransport | StreamableHTTPServerTransport
@@ -101,23 +142,53 @@ async function runProxy(
   let server: any = null
   let remoteTransport: any = null
 
-  // Define an auth initializer function
+  // Define an auth initializer function that works with both OAuth and SAML2
   const authInitializer = async () => {
-    const authState = await authCoordinator.initializeAuth()
+    let authState: any
+
+    if (authMode === 'saml2') {
+      authState = await authCoordinator.initializeSAMLAuth()
+    } else {
+      authState = await authCoordinator.initializeAuth()
+    }
 
     // Store server in outer scope for cleanup
     server = authState.server
 
     // If auth was completed by another instance, just log that we'll use the auth from disk
     if (authState.skipBrowserAuth) {
-      log('Authentication was completed by another instance - will use tokens from disk')
+      const authType = authMode === 'saml2' ? 'SAML2' : 'OAuth'
+      log(`${authType} authentication was completed by another instance - will use tokens from disk`)
       // TODO: remove, the callback is happening before the tokens are exchanged
       //  so we're slightly too early
       await new Promise((res) => setTimeout(res, 1_000))
     }
 
+    // Return unified interface for both auth types
     return {
-      waitForAuthCode: authState.waitForAuthCode,
+      waitForAuthCode: authMode === 'saml2' 
+        ? async () => {
+            const samlResponse = await authState.waitForSAMLResponse()
+            // For SAML2, we need to process the response and extract the assertion
+            if (typeof samlResponse === 'string') {
+              return samlResponse
+            } else {
+              // Process the SAML response to create and store the token
+              try {
+                const token = await rawAuthProvider.processResponse(samlResponse.response, samlResponse.relayState)
+                if (DEBUG) debugLog('SAML2 response processed successfully', {
+                  nameId: token.claims.nameId,
+                  expiresAt: token.expiresAt
+                })
+                // Return the assertion for the transport layer to use
+                return token.assertion
+              } catch (error) {
+                log('Failed to process SAML response:', error)
+                throw error
+              }
+            }
+          }
+        : authState.waitForAuthCode,
       skipBrowserAuth: authState.skipBrowserAuth,
     }
   }
@@ -203,9 +274,11 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       host,
       debug,
       useHttpLocal,
+      authMode,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authorizeResource,
+      saml2Config,
     }) => {
       return runProxy(
         serverUrl,
@@ -214,9 +287,11 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         transportStrategy,
         host,
         useHttpLocal,
+        authMode,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authorizeResource,
+        saml2Config,
       )
     },
   )

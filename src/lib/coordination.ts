@@ -5,9 +5,15 @@ import express from 'express'
 import { AddressInfo } from 'net'
 import { unlinkSync } from 'fs'
 import { log, debugLog, DEBUG, setupOAuthCallbackServerWithLongPoll } from './utils'
+import { setupSAML2CallbackServerWithLongPoll } from './saml-utils'
+import { SAML2CallbackServerOptions } from './saml-types'
 
 export type AuthCoordinator = {
   initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
+}
+
+export type SAML2AuthCoordinator = {
+  initializeSAMLAuth: () => Promise<{ server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean }>
 }
 
 /**
@@ -146,6 +152,189 @@ export function createLazyAuthCoordinator(serverUrlHash: string, callbackPort: n
       // Initialize auth using the existing coordinateAuth logic
       authState = await coordinateAuth(serverUrlHash, callbackPort, events)
       if (DEBUG) debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
+      return authState
+    },
+  }
+}
+
+/**
+ * Coordinates SAML2 authentication between multiple instances of the client/proxy
+ * @param serverUrlHash The hash of the server URL
+ * @param callbackPort The port to use for the callback server
+ * @param events The event emitter to use for signaling
+ * @param acsPath The path for the ACS endpoint
+ * @param slsPath The path for the SLS endpoint
+ * @returns An object with the server, waitForSAMLResponse function, and a flag indicating if browser auth can be skipped
+ */
+export async function coordinateSAML2Auth(
+  serverUrlHash: string,
+  callbackPort: number,
+  events: EventEmitter,
+  acsPath: string = '/saml/acs',
+  slsPath: string = '/saml/sls'
+): Promise<{ server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean }> {
+  if (DEBUG) debugLog('Coordinating SAML2 authentication', { serverUrlHash, callbackPort, acsPath, slsPath })
+
+  // Check for a lockfile (disabled on Windows for the time being)
+  const lockData = process.platform === 'win32' ? null : await checkLockfile(serverUrlHash)
+
+  if (DEBUG) {
+    if (process.platform === 'win32') {
+      debugLog('Skipping lockfile check on Windows')
+    } else {
+      debugLog('SAML2 lockfile check result', { found: !!lockData, lockData })
+    }
+  }
+
+  // If there's a valid lockfile, try to use the existing auth process
+  if (lockData && (await isLockValid(lockData))) {
+    log(`Another instance is handling SAML2 authentication on port ${lockData.port} (pid: ${lockData.pid})`)
+
+    try {
+      // Try to wait for the authentication to complete
+      if (DEBUG) debugLog('Waiting for SAML2 authentication from other instance')
+      const authCompleted = await waitForSAML2Authentication(lockData.port)
+
+      if (authCompleted) {
+        log('SAML2 authentication completed by another instance. Using tokens from disk')
+
+        // Setup a dummy server - the client will use tokens directly from disk
+        const dummyServer = express().listen(0) // Listen on any available port
+        const dummyPort = (dummyServer.address() as AddressInfo).port
+        if (DEBUG) debugLog('Started dummy SAML2 server', { port: dummyPort })
+
+        // This shouldn't actually be called in normal operation, but provide it for API compatibility
+        const dummyWaitForSAMLResponse = () => {
+          log('WARNING: waitForSAMLResponse called in secondary instance - this is unexpected')
+          // Return a promise that never resolves - the client should use the tokens from disk instead
+          return new Promise<{ response: string; relayState?: string }>(() => {})
+        }
+
+        return {
+          server: dummyServer,
+          waitForSAMLResponse: dummyWaitForSAMLResponse,
+          skipBrowserAuth: true,
+        }
+      } else {
+        log('Taking over SAML2 authentication process...')
+      }
+    } catch (error) {
+      log(`Error waiting for SAML2 authentication: ${error}`)
+      if (DEBUG) debugLog('Error waiting for SAML2 authentication', error)
+    }
+
+    // If we get here, the other process didn't complete auth successfully
+    if (DEBUG) debugLog('Other instance did not complete SAML2 auth successfully, deleting lockfile')
+    await deleteLockfile(serverUrlHash)
+  } else if (lockData) {
+    // Invalid lockfile, delete it
+    log('Found invalid SAML2 lockfile, deleting it')
+    await deleteLockfile(serverUrlHash)
+  }
+
+  // Create our own lockfile
+  if (DEBUG) debugLog('Setting up SAML2 callback server', { port: callbackPort, acsPath, slsPath })
+  const { server, waitForSAMLResponse, authCompletedPromise } = setupSAML2CallbackServerWithLongPoll({
+    port: callbackPort,
+    acsPath,
+    slsPath,
+    events,
+  })
+
+  // Get the actual port the server is running on
+  const address = server.address() as AddressInfo
+  const actualPort = address.port
+  if (DEBUG) debugLog('SAML2 callback server running', { port: actualPort })
+
+  log(`Creating lockfile for SAML2 server ${serverUrlHash} with process ${process.pid} on port ${actualPort}`)
+  await createLockfile(serverUrlHash, process.pid, actualPort)
+
+  // Make sure lockfile is deleted on process exit
+  const cleanupHandler = async () => {
+    try {
+      log(`Cleaning up SAML2 lockfile for server ${serverUrlHash}`)
+      await deleteLockfile(serverUrlHash)
+    } catch (error) {
+      log(`Error cleaning up SAML2 lockfile: ${error}`)
+      if (DEBUG) debugLog('Error cleaning up SAML2 lockfile', error)
+    }
+  }
+
+  process.once('exit', () => {
+    try {
+      // Synchronous version for 'exit' event since we can't use async here
+      const configPath = getConfigFilePath(serverUrlHash, 'lock.json')
+      unlinkSync(configPath)
+      if (DEBUG) console.error(`[DEBUG] Removed SAML2 lockfile on exit: ${configPath}`)
+    } catch (error) {
+      if (DEBUG) console.error(`[DEBUG] Error removing SAML2 lockfile on exit:`, error)
+    }
+  })
+
+  // Also handle SIGINT separately
+  process.once('SIGINT', async () => {
+    if (DEBUG) debugLog('Received SIGINT signal, cleaning up SAML2')
+    await cleanupHandler()
+  })
+
+  if (DEBUG) debugLog('SAML2 auth coordination complete, returning primary instance handlers')
+  return {
+    server,
+    waitForSAMLResponse,
+    skipBrowserAuth: false,
+  }
+}
+
+/**
+ * Wait for SAML2 authentication to complete from another server instance
+ * @param port The port to check for authentication completion
+ * @returns A promise that resolves to true if authentication completed, false otherwise
+ */
+export async function waitForSAML2Authentication(port: number): Promise<boolean> {
+  if (DEBUG) debugLog('Waiting for SAML2 authentication from another instance', { port })
+
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 35000) // Slightly longer than server timeout
+
+    const response = await fetch(`http://127.0.0.1:${port}/wait-for-saml-auth`, {
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeout)
+
+    const isCompleted = response.status === 200
+    if (DEBUG) debugLog(`SAML2 authentication check result: ${isCompleted ? 'completed' : 'in progress'}`, { status: response.status })
+    return isCompleted
+  } catch (error) {
+    if (DEBUG) debugLog('Error waiting for SAML2 authentication from other instance', error)
+    return false
+  }
+}
+
+export function createLazySAML2AuthCoordinator(
+  serverUrlHash: string, 
+  callbackPort: number, 
+  events: EventEmitter,
+  acsPath: string = '/saml/acs',
+  slsPath: string = '/saml/sls'
+): SAML2AuthCoordinator {
+  let authState: { server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean } | null = null
+
+  return {
+    initializeSAMLAuth: async () => {
+      // If auth has already been initialized, return the existing state
+      if (authState) {
+        if (DEBUG) debugLog('SAML2 auth already initialized, reusing existing state')
+        return authState
+      }
+
+      log('Initializing SAML2 auth coordination on-demand')
+      if (DEBUG) debugLog('Initializing SAML2 auth coordination on-demand', { serverUrlHash, callbackPort, acsPath, slsPath })
+
+      // Initialize auth using the existing coordinateSAML2Auth logic
+      authState = await coordinateSAML2Auth(serverUrlHash, callbackPort, events, acsPath, slsPath)
+      if (DEBUG) debugLog('SAML2 auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
       return authState
     },
   }
