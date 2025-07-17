@@ -30,6 +30,8 @@ export interface SAML2ProviderOptions {
   privateKey?: string
   /** Certificate for SAML signing */
   certificate?: string
+  /** IdP certificate for signature validation */
+  idpCert?: string
   /** Whether to sign SAML requests */
   signRequests?: boolean
   /** Whether to require signed assertions */
@@ -132,19 +134,19 @@ export interface SAML2SPMetadata {
 export interface SAML2Provider {
   /** Generate SAML authentication request URL */
   getAuthUrl(relayState?: string): Promise<{ url: string; requestId: string }>
-  
+
   /** Process SAML response and extract token */
   processResponse(samlResponse: string, relayState?: string): Promise<SAML2Token>
-  
+
   /** Generate SP metadata XML */
   getMetadata(): Promise<SAML2SPMetadata>
-  
+
   /** Generate logout request URL */
   getLogoutUrl(nameId: string, sessionIndex?: string): Promise<{ url: string; requestId: string }>
-  
+
   /** Process logout response */
   processLogoutResponse(samlResponse: string): Promise<boolean>
-  
+
   /** Validate token (check expiration, etc.) */
   validateToken(token: SAML2Token): Promise<boolean>
 }
@@ -158,4 +160,4 @@ export interface SAML2AuthEvents {
   'auth-error': (error: Error) => void
   'logout-request': (requestId: string, logoutUrl: string) => void
   'logout-response': (success: boolean) => void
-} 
+}

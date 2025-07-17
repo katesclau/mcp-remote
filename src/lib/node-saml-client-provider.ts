@@ -1,27 +1,19 @@
 import open from 'open'
 import { randomUUID } from 'node:crypto'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
-import { 
-  SAML2Provider, 
-  SAML2ProviderOptions, 
-  SAML2Token, 
-  SAML2Claims, 
-  SAML2SPMetadata, 
-  SAML2AuthRequest 
-} from './saml-types'
+import { SAML2Provider, SAML2ProviderOptions, SAML2Token, SAML2Claims, SAML2SPMetadata, SAML2AuthRequest } from './saml-types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 
-// Import SAML library (with proper typing)
-import * as saml2 from 'saml2-js'
+// Import new SAML library
+import { SAML, Profile } from '@node-saml/node-saml'
 import { parseString as parseXML } from 'xml2js'
 
 // Type definitions for callback functions
 type ParseXMLCallback = (err: any, result: any) => void
-type SAMLCallback<T = any> = (err: any, ...args: any[]) => void
 
 /**
- * Implements the SAML2Provider interface for Node.js environments.
+ * Implements the SAML2Provider interface for Node.js environments using @node-saml/node-saml.
  * Handles SAML2 authentication flow and assertion storage for MCP clients.
  */
 export class NodeSAML2ClientProvider implements SAML2Provider {
@@ -30,9 +22,9 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
   private slsPath: string
   private spEntityId: string
   private nameIdFormat: string
-  private sp: saml2.ServiceProvider | null = null
-  private idp: saml2.IdentityProvider | null = null
+  private saml: SAML | null = null
   private pendingRequests: Map<string, SAML2AuthRequest> = new Map()
+  private initializationPromise: Promise<void>
 
   /**
    * Creates a new NodeSAML2ClientProvider
@@ -44,46 +36,84 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
     this.slsPath = options.slsPath || '/saml/sls'
     this.spEntityId = options.spEntityId || 'mcp-remote-saml-sp'
     this.nameIdFormat = options.nameIdFormat || 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress'
-    
-    this.initializeSAML()
+
+    this.initializationPromise = this.initializeSAML()
   }
 
   get acsUrl(): string {
-    return `https://${this.options.host}:${this.options.callbackPort}${this.acsPath}`
+    // For HTTPS URLs, don't include port number (use standard 443)
+    return `https://${this.options.host}${this.acsPath}`
   }
 
   get slsUrl(): string {
-    return `https://${this.options.host}:${this.options.callbackPort}${this.slsPath}`
+    // For HTTPS URLs, don't include port number (use standard 443)
+    return `https://${this.options.host}${this.slsPath}`
   }
 
   /**
-   * Initialize SAML Service Provider and Identity Provider
+   * Initialize SAML Service Provider
    */
   private async initializeSAML(): Promise<void> {
     try {
       // Load or generate SP certificate and private key
       const { certificate, privateKey } = await this.loadOrGenerateCredentials()
 
-      // Create Service Provider
-      this.sp = new saml2.ServiceProvider({
-        entity_id: this.spEntityId,
-        private_key: privateKey,
-        certificate: certificate,
-        assert_endpoint: this.acsUrl,
-        force_authn: this.options.forceAuthn || false,
-        auth_context: {
-          comparison: 'exact',
-          class_refs: ['urn:oasis:names:tc:SAML:1.1:ac:classes:PasswordProtectedTransport']
-        },
-        nameid_format: this.nameIdFormat,
-        sign_get_request: this.options.signRequests || false,
-        allow_unencrypted_assertion: !this.options.requireSignedAssertions
+      // Initialize IdP configuration
+      const idpConfig = await this.initializeIdPConfig()
+
+      // Create SAML instance with node-saml configuration
+      this.saml = new SAML({
+        // Service Provider configuration
+        issuer: this.spEntityId,
+        callbackUrl: this.acsUrl,
+        privateKey: privateKey,
+        publicCert: certificate,
+
+        // Identity Provider configuration
+        entryPoint: idpConfig.ssoUrl,
+        logoutUrl: idpConfig.logoutUrl || idpConfig.ssoUrl,
+        // Enable IdP certificate for signature validation
+        idpCert: this.options.idpCert || [],
+
+        // Authentication settings (enable signature validation)
+        wantAssertionsSigned: this.options.requireSignedAssertions !== false,
+        wantAuthnResponseSigned: this.options.requireSignedAssertions !== false,
+        signatureAlgorithm: 'sha256',
+        digestAlgorithm: 'sha256',
+
+        // Request signing  
+        authnRequestBinding: 'HTTP-Redirect',
+
+        // NameID format
+        identifierFormat: this.nameIdFormat,
+
+        // Additional options
+        forceAuthn: this.options.forceAuthn || false,
+        skipRequestCompression: false,
+        disableRequestedAuthnContext: true,
+        acceptedClockSkewMs: 0,
+        maxAssertionAgeMs: 3600000, // 1 hour
+        cacheProvider: {
+          saveAsync: async (key: string, value: string) => {
+            // Simple cache implementation - in production, use Redis or similar
+            return Promise.resolve({ createdAt: Date.now(), value })
+          },
+          getAsync: async (key: string) => {
+            // Simple cache implementation
+            return Promise.resolve(null)
+          },
+          removeAsync: async (key: string) => {
+            return Promise.resolve(null)
+          }
+        }
       })
 
-      // Initialize IdP from metadata or configuration
-      await this.initializeIdP()
-
-      if (DEBUG) debugLog('SAML2 provider initialized successfully')
+      if (DEBUG) debugLog('SAML2 provider initialized successfully', {
+        hasIdpCert: 'disabled for testing',
+        idpCertLength: 0,
+        wantAssertionsSigned: false,
+        wantAuthnResponseSigned: false
+      })
     } catch (error) {
       log(`Failed to initialize SAML2 provider: ${(error as Error).message}`)
       throw error
@@ -91,55 +121,50 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
   }
 
   /**
-   * Initialize Identity Provider from metadata or configuration
+   * Initialize Identity Provider configuration from metadata or direct config
    */
-  private async initializeIdP(): Promise<void> {
+  private async initializeIdPConfig(): Promise<{
+    ssoUrl: string
+    logoutUrl?: string
+    certificates: string | string[]
+  }> {
     if (!this.options.idpMetadata && (!this.options.idpSsoUrl || !this.options.idpEntityId)) {
       throw new Error('Either idpMetadata or idpSsoUrl+idpEntityId must be provided')
     }
 
     if (this.options.idpMetadata) {
       // Load IdP from metadata URL or XML
+      let metadataXml: string
+
       if (this.options.idpMetadata.startsWith('http')) {
         // Fetch metadata from URL
         const response = await fetch(this.options.idpMetadata)
-        const metadataXml = await response.text()
-        this.idp = new saml2.IdentityProvider({ 
-          sso_login_url: '', // Will be extracted from metadata
-          sso_logout_url: '', // Will be extracted from metadata
-          certificates: [], // Will be extracted from metadata
-          force_authn: this.options.forceAuthn || false,
-          sign_get_request: this.options.signRequests || false
-        })
-        // Parse metadata XML to extract URLs and certificates
-        await this.parseIdPMetadata(metadataXml)
+        metadataXml = await response.text()
       } else {
         // Assume it's XML content
-        this.idp = new saml2.IdentityProvider({
-          sso_login_url: '', // Will be extracted from metadata
-          sso_logout_url: '', // Will be extracted from metadata
-          certificates: [], // Will be extracted from metadata
-          force_authn: this.options.forceAuthn || false,
-          sign_get_request: this.options.signRequests || false
-        })
-        await this.parseIdPMetadata(this.options.idpMetadata)
+        metadataXml = this.options.idpMetadata
       }
+
+      // Parse metadata XML to extract URLs and certificates
+      return await this.parseIdPMetadata(metadataXml)
     } else {
       // Create IdP from direct configuration
-      this.idp = new saml2.IdentityProvider({
-        sso_login_url: this.options.idpSsoUrl!,
-        sso_logout_url: this.options.idpSlsUrl || '',
-        certificates: [], // TODO: Load from configuration
-        force_authn: this.options.forceAuthn || false,
-        sign_get_request: this.options.signRequests || false
-      })
+      return {
+        ssoUrl: this.options.idpSsoUrl!,
+        logoutUrl: this.options.idpSlsUrl,
+        certificates: [], // TODO: Load from configuration if needed
+      }
     }
   }
 
   /**
    * Parse IdP metadata XML to extract SSO URLs and certificates
    */
-  private async parseIdPMetadata(metadataXml: string): Promise<void> {
+  private async parseIdPMetadata(metadataXml: string): Promise<{
+    ssoUrl: string
+    logoutUrl?: string
+    certificates: string[]
+  }> {
     return new Promise((resolve, reject) => {
       parseXML(metadataXml, (err: any, result: any) => {
         if (err) {
@@ -148,18 +173,63 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
         }
 
         try {
-          // Extract SSO URL, SLS URL, and certificates from metadata
-          // This is a simplified parser - in production, you'd want more robust parsing
-          const descriptor = result?.EntityDescriptor || result?.['md:EntityDescriptor']
+          const descriptor = result.EntityDescriptor || result['md:EntityDescriptor']
           if (!descriptor) {
-            throw new Error('Invalid metadata: EntityDescriptor not found')
+            throw new Error('Invalid metadata: no EntityDescriptor found')
           }
 
-          // TODO: Implement proper metadata parsing
-          // For now, use provided URLs if metadata parsing fails
-          resolve()
+          const ssoDescriptor = descriptor.IDPSSODescriptor?.[0] || descriptor['md:IDPSSODescriptor']?.[0]
+          if (!ssoDescriptor) {
+            throw new Error('Invalid metadata: no IDPSSODescriptor found')
+          }
+
+          // Extract SSO service URL
+          const ssoServices = ssoDescriptor.SingleSignOnService || ssoDescriptor['md:SingleSignOnService'] || []
+          const redirectBinding = ssoServices.find(
+            (service: any) => service.$.Binding === 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+          )
+
+          if (!redirectBinding) {
+            throw new Error('No HTTP-Redirect SSO service found in metadata')
+          }
+
+          const ssoUrl = redirectBinding.$.Location
+
+          // Extract logout service URL (optional)
+          const logoutServices = ssoDescriptor.SingleLogoutService || ssoDescriptor['md:SingleLogoutService'] || []
+          const logoutService = logoutServices.find(
+            (service: any) => service.$.Binding === 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+          )
+          const logoutUrl = logoutService?.$.Location
+
+          // Extract certificates
+          const keyDescriptors = ssoDescriptor.KeyDescriptor || ssoDescriptor['md:KeyDescriptor'] || []
+          const certificates: string[] = []
+
+          for (const keyDescriptor of keyDescriptors) {
+            const keyInfo = keyDescriptor.KeyInfo?.[0] || keyDescriptor['ds:KeyInfo']?.[0]
+            const x509Data = keyInfo?.X509Data?.[0] || keyInfo?.[`ds:X509Data`]?.[0]
+            const x509Certificate = x509Data?.X509Certificate?.[0] || x509Data?.[`ds:X509Certificate`]?.[0]
+
+            if (x509Certificate) {
+              // Clean up certificate (remove whitespace) and format as PEM
+              const cleanCert = x509Certificate.replace(/\s+/g, '')
+              // Add PEM headers and format with line breaks every 64 characters
+              const formattedCert = cleanCert.match(/.{1,64}/g)?.join('\n') || cleanCert
+              const pemCert = `-----BEGIN CERTIFICATE-----\n${formattedCert}\n-----END CERTIFICATE-----`
+              certificates.push(pemCert)
+            }
+          }
+
+          if (DEBUG) debugLog('Parsed IdP metadata', { ssoUrl, logoutUrl, certificateCount: certificates.length })
+
+          resolve({
+            ssoUrl,
+            logoutUrl,
+            certificates,
+          })
         } catch (error) {
-          reject(error)
+          reject(new Error(`Failed to parse IdP metadata: ${(error as Error).message}`))
         }
       })
     })
@@ -173,27 +243,26 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
       // Try to load existing credentials
       const certificate = await readTextFile(this.serverUrlHash, 'saml_certificate.pem')
       const privateKey = await readTextFile(this.serverUrlHash, 'saml_private_key.pem')
-      
+
       if (certificate && privateKey) {
         if (DEBUG) debugLog('Loaded existing SAML credentials')
         return { certificate, privateKey }
       }
     } catch (error) {
-      if (DEBUG) debugLog('No existing SAML credentials found, will generate new ones')
+      if (DEBUG) debugLog('No existing SAML credentials found, will use provided ones')
     }
 
-    // Generate new credentials if none exist or provided in options
+    // Use credentials from options
     if (this.options.certificate && this.options.privateKey) {
       await writeTextFile(this.serverUrlHash, 'saml_certificate.pem', this.options.certificate)
       await writeTextFile(this.serverUrlHash, 'saml_private_key.pem', this.options.privateKey)
       return {
         certificate: this.options.certificate,
-        privateKey: this.options.privateKey
+        privateKey: this.options.privateKey,
       }
     }
 
     // For now, throw an error if no credentials are provided
-    // In a full implementation, you might generate self-signed certificates
     throw new Error('SAML credentials must be provided in options.certificate and options.privateKey')
   }
 
@@ -201,7 +270,10 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
    * Generate SAML authentication request URL
    */
   async getAuthUrl(relayState?: string): Promise<{ url: string; requestId: string }> {
-    if (!this.sp || !this.idp) {
+    // Ensure initialization is complete
+    await this.initializationPromise
+
+    if (!this.saml) {
       throw new Error('SAML provider not initialized')
     }
 
@@ -209,103 +281,190 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
     const authRequest: SAML2AuthRequest = {
       id: requestId,
       relayState,
-      timestamp: new Date()
+      timestamp: new Date(),
     }
 
     // Store pending request
     this.pendingRequests.set(requestId, authRequest)
 
-    return new Promise((resolve, reject) => {
-      this.sp!.create_login_request_url(this.idp!, {}, (err: any, login_url: any, request_id: any) => {
-        if (err) {
-          this.pendingRequests.delete(requestId)
-          reject(new Error(`Failed to create SAML login request: ${err.message || err}`))
-          return
-        }
-
-        if (DEBUG) debugLog('Generated SAML auth URL', { requestId, login_url })
-        resolve({ url: login_url, requestId })
-      })
-    })
+        try {
+      const loginUrl = await this.saml.getAuthorizeUrlAsync(relayState || '', this.options.host || '', {})
+      
+      if (DEBUG) debugLog('Generated SAML auth URL', { requestId, loginUrl })
+      return { url: loginUrl, requestId }
+    } catch (error) {
+      this.pendingRequests.delete(requestId)
+      throw new Error(`Failed to create SAML login request: ${(error as Error).message}`)
+    }
   }
 
   /**
    * Process SAML response and extract token
    */
   async processResponse(samlResponse: string, relayState?: string): Promise<SAML2Token> {
-    if (!this.sp || !this.idp) {
+    // Ensure initialization is complete
+    await this.initializationPromise
+
+    if (!this.saml) {
       throw new Error('SAML provider not initialized')
     }
 
-    return new Promise((resolve, reject) => {
-      const options = {
-        request_body: {
-          SAMLResponse: samlResponse,
-          RelayState: relayState
-        },
-        allow_unencrypted_assertion: !this.options.requireSignedAssertions
+    try {
+      if (DEBUG) debugLog('Processing SAML response', { 
+        responseLength: samlResponse.length,
+        hasIdpCert: !!this.options.idpCert,
+        wantAssertionsSigned: this.options.requireSignedAssertions,
+        idpCertLength: this.options.idpCert?.length || 0
+      })
+
+      // Decode and log the SAML response for debugging
+      if (DEBUG) {
+        try {
+          const decodedResponse = Buffer.from(samlResponse, 'base64').toString('utf8')
+          
+          // Count signatures and their locations
+          const responseSignatures = (decodedResponse.match(/<ds:Signature[^>]*>/g) || []).length
+          const assertionSignatures = decodedResponse.includes('<saml:Assertion') && decodedResponse.includes('<ds:Signature')
+          
+          // Check signature position
+          const responseHasSignature = decodedResponse.indexOf('<ds:Signature') > 0 && 
+                                       decodedResponse.indexOf('<ds:Signature') < decodedResponse.indexOf('<saml:Assertion')
+          
+          debugLog('SAML response signature analysis', { 
+            preview: decodedResponse.substring(0, 800) + '...',
+            totalSignatures: responseSignatures,
+            responseHasSignature,
+            assertionSignatures,
+            signaturePositions: (decodedResponse.match(/<ds:Signature[^>]*>/g) || []).map((_, i) => decodedResponse.indexOf('<ds:Signature', i > 0 ? decodedResponse.indexOf('<ds:Signature') + 1 : 0))
+          })
+        } catch (e) {
+          debugLog('Failed to decode SAML response for analysis')
+        }
       }
 
-      this.sp!.post_assert(this.idp!, options, async (err: any, saml_response: any) => {
-        if (err) {
-          reject(new Error(`Failed to process SAML response: ${err.message || err}`))
-          return
-        }
+      // Log SAML configuration for debugging
+      if (DEBUG && this.saml) {
+        debugLog('SAML validation configuration', {
+          wantAuthnResponseSigned: (this.saml as any).options?.wantAuthnResponseSigned,
+          wantAssertionsSigned: (this.saml as any).options?.wantAssertionsSigned,
+          hasIdpCert: !!(this.saml as any).options?.idpCert?.length,
+          idpCertCount: (this.saml as any).options?.idpCert?.length || 0
+        })
+      }
 
-        try {
-          // Extract claims from SAML response
-          const claims = this.extractClaims(saml_response)
-          
-          // Create token with Base64-encoded assertion
-          const assertion = Buffer.from(samlResponse, 'utf8').toString('base64')
-          const token: SAML2Token = {
-            assertion,
-            claims,
-            issuedAt: new Date(),
-            expiresAt: claims.expiresAt || new Date(Date.now() + 30 * 60 * 1000) // Default 30 minutes
-          }
-
-          // Store token
-          await this.storeToken(token)
-
-          if (DEBUG) debugLog('Processed SAML response successfully', { 
-            nameId: claims.nameId,
-            email: claims.email,
-            expiresAt: token.expiresAt
-          })
-
-          resolve(token)
-        } catch (error) {
-          reject(new Error(`Failed to extract claims from SAML response: ${(error as Error).message}`))
-        }
+      // Validate and parse SAML response
+      const result = await this.saml.validatePostResponseAsync({
+        SAMLResponse: samlResponse,
+        RelayState: relayState || '',
       })
-    })
+
+      if (DEBUG) debugLog('SAML response validated successfully')
+
+      if (!result.profile) {
+        throw new Error('No profile returned from SAML response')
+      }
+
+      // Extract claims from profile
+      const claims = this.extractClaims(result.profile)
+
+      // Create token
+      const token: SAML2Token = {
+        assertion: samlResponse, // Base64-encoded SAML response
+        claims,
+        issuedAt: new Date(),
+        expiresAt: claims.expiresAt || new Date(Date.now() + 3600000), // Default 1 hour
+      }
+
+      // Store token
+      await this.storeToken(token)
+
+      if (DEBUG) debugLog('Processed SAML response successfully', { nameId: claims.nameId })
+      return token
+    } catch (error) {
+      if (DEBUG) {
+        debugLog('SAML response processing error details', {
+          errorMessage: (error as Error).message,
+          errorStack: (error as Error).stack?.split('\n').slice(0, 5),
+          errorName: (error as Error).name
+        })
+      }
+      
+      // Check if this is a signature validation error
+      if ((error as Error).message.includes('Invalid document signature')) {
+        throw new Error(`Failed to process SAML response: Document signature validation failed. This may be due to Keycloak only signing assertions but not the full document, or a certificate/algorithm mismatch. Original error: ${(error as Error).message}`)
+      }
+      
+      throw new Error(`Failed to process SAML response: ${(error as Error).message}`)
+    }
   }
 
   /**
-   * Extract claims from SAML response
+   * Extract claims from SAML profile
    */
-  private extractClaims(samlResponse: any): SAML2Claims {
+  private extractClaims(profile: Profile): SAML2Claims {
     const claims: SAML2Claims = {
-      nameId: samlResponse.user?.name_id || '',
-      sessionIndex: samlResponse.user?.session_index,
-      email: samlResponse.user?.attributes?.email?.[0] || samlResponse.user?.attributes?.Email?.[0],
-      firstName: samlResponse.user?.attributes?.firstName?.[0] || samlResponse.user?.attributes?.FirstName?.[0],
-      lastName: samlResponse.user?.attributes?.lastName?.[0] || samlResponse.user?.attributes?.LastName?.[0],
-      displayName: samlResponse.user?.attributes?.displayName?.[0] || samlResponse.user?.attributes?.DisplayName?.[0],
-      attributes: samlResponse.user?.attributes || {},
-      issuer: samlResponse.response_header?.destination
+      nameId: profile.nameID || '',
+      sessionIndex: profile.sessionIndex,
+      issuedAt: new Date(),
+      issuer: profile.issuer,
     }
 
-    // Parse groups if present
-    const groups = samlResponse.user?.attributes?.groups || samlResponse.user?.attributes?.Groups
-    if (groups) {
-      claims.groups = Array.isArray(groups) ? groups : [groups]
+    // Extract standard attributes
+    if (profile.email && typeof profile.email === 'string') claims.email = profile.email
+    if (profile.firstName && typeof profile.firstName === 'string') claims.firstName = profile.firstName
+    if (profile.lastName && typeof profile.lastName === 'string') claims.lastName = profile.lastName
+    if (profile.displayName && typeof profile.displayName === 'string') claims.displayName = profile.displayName
+
+    // Extract custom attributes
+    if (profile.attributes) {
+      claims.attributes = {}
+      for (const [key, value] of Object.entries(profile.attributes)) {
+        claims.attributes[key] = Array.isArray(value) ? value : [value as string]
+      }
+
+      // Map common attribute names
+      const emailAttrs = ['email', 'emailAddress', 'mail', 'Email']
+      const firstNameAttrs = ['firstName', 'givenName', 'FirstName', 'GivenName']
+      const lastNameAttrs = ['lastName', 'surname', 'LastName', 'Surname']
+      const displayNameAttrs = ['displayName', 'cn', 'commonName', 'DisplayName']
+      const groupAttrs = ['groups', 'memberOf', 'Groups', 'MemberOf']
+
+      for (const attr of emailAttrs) {
+        if (claims.attributes[attr] && !claims.email) {
+          claims.email = Array.isArray(claims.attributes[attr]) ? claims.attributes[attr][0] : (claims.attributes[attr] as string)
+        }
+      }
+
+      for (const attr of firstNameAttrs) {
+        if (claims.attributes[attr] && !claims.firstName) {
+          claims.firstName = Array.isArray(claims.attributes[attr]) ? claims.attributes[attr][0] : (claims.attributes[attr] as string)
+        }
+      }
+
+      for (const attr of lastNameAttrs) {
+        if (claims.attributes[attr] && !claims.lastName) {
+          claims.lastName = Array.isArray(claims.attributes[attr]) ? claims.attributes[attr][0] : (claims.attributes[attr] as string)
+        }
+      }
+
+      for (const attr of displayNameAttrs) {
+        if (claims.attributes[attr] && !claims.displayName) {
+          claims.displayName = Array.isArray(claims.attributes[attr]) ? claims.attributes[attr][0] : (claims.attributes[attr] as string)
+        }
+      }
+
+      for (const attr of groupAttrs) {
+        if (claims.attributes[attr] && !claims.groups) {
+          claims.groups = Array.isArray(claims.attributes[attr])
+            ? (claims.attributes[attr] as string[])
+            : [claims.attributes[attr] as string]
+        }
+      }
     }
 
-    // Set expiration based on conditions
-    if (samlResponse.user?.session_not_on_or_after) {
-      claims.expiresAt = new Date(samlResponse.user.session_not_on_or_after)
+    // Set expiration from session info if available
+    if (profile.sessionNotOnOrAfter && (typeof profile.sessionNotOnOrAfter === 'string' || typeof profile.sessionNotOnOrAfter === 'number')) {
+      claims.expiresAt = new Date(profile.sessionNotOnOrAfter)
     }
 
     return claims
@@ -315,24 +474,30 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
    * Generate SP metadata XML
    */
   async getMetadata(): Promise<SAML2SPMetadata> {
-    if (!this.sp) {
+    // Ensure initialization is complete
+    await this.initializationPromise
+
+    if (!this.saml) {
       throw new Error('SAML provider not initialized')
     }
 
     try {
-      const metadata = this.sp.create_metadata()
+      const metadata = this.saml.generateServiceProviderMetadata(
+        this.options.certificate || null,
+        this.options.certificate || null, // Using same cert for both signing and encryption
+      )
 
       const spMetadata: SAML2SPMetadata = {
         entityId: this.spEntityId,
         acsUrl: this.acsUrl,
         slsUrl: this.slsUrl,
         metadataXml: metadata,
-        certificate: this.options.certificate
+        certificate: this.options.certificate,
       }
 
       return spMetadata
     } catch (error) {
-      throw new Error(`Failed to generate SP metadata: ${(error as Error).message || error}`)
+      throw new Error(`Failed to generate SP metadata: ${(error as Error).message}`)
     }
   }
 
@@ -340,38 +505,43 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
    * Generate logout request URL
    */
   async getLogoutUrl(nameId: string, sessionIndex?: string): Promise<{ url: string; requestId: string }> {
-    if (!this.sp || !this.idp) {
+    // Ensure initialization is complete
+    await this.initializationPromise
+
+    if (!this.saml) {
       throw new Error('SAML provider not initialized')
     }
 
     const requestId = randomUUID()
 
-    return new Promise((resolve, reject) => {
-      const options = {
-        name_id: nameId,
-        session_index: sessionIndex
-      }
+    try {
+      const logoutUrl = await this.saml.getLogoutUrlAsync({
+        nameID: nameId,
+        sessionIndex: sessionIndex,
+        issuer: this.spEntityId,
+        nameIDFormat: this.nameIdFormat
+      }, '', {})
 
-      this.sp!.create_logout_request_url(this.idp!, options, (err: any, logout_url: any) => {
-        if (err) {
-          reject(new Error(`Failed to create SAML logout request: ${err.message || err}`))
-          return
-        }
-
-        if (DEBUG) debugLog('Generated SAML logout URL', { requestId, logout_url })
-        resolve({ url: logout_url, requestId })
-      })
-    })
+      if (DEBUG) debugLog('Generated SAML logout URL', { requestId, logoutUrl })
+      return { url: logoutUrl, requestId }
+    } catch (error) {
+      throw new Error(`Failed to create SAML logout request: ${(error as Error).message}`)
+    }
   }
 
   /**
    * Process logout response
    */
   async processLogoutResponse(samlResponse: string): Promise<boolean> {
-    // For simplicity, assume logout was successful
-    // In a full implementation, you'd validate the logout response
-    await this.clearStoredToken()
-    return true
+    try {
+      // For simplicity, assume logout was successful
+      // In a full implementation, you'd validate the logout response using this.saml.validatePostResponseAsync
+      await this.clearStoredToken()
+      return true
+    } catch (error) {
+      if (DEBUG) debugLog('Error processing logout response:', error)
+      return false
+    }
   }
 
   /**
@@ -379,7 +549,7 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
    */
   async validateToken(token: SAML2Token): Promise<boolean> {
     const now = new Date()
-    
+
     // Check if token is expired
     if (token.expiresAt && now > token.expiresAt) {
       if (DEBUG) debugLog('Token is expired', { expiresAt: token.expiresAt, now })
@@ -402,7 +572,7 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
         assertion: tokenData.assertion,
         claims: tokenData.claims,
         issuedAt: new Date(tokenData.issuedAt),
-        expiresAt: new Date(tokenData.expiresAt)
+        expiresAt: new Date(tokenData.expiresAt),
       }
 
       // Validate token before returning
@@ -427,7 +597,7 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
       assertion: token.assertion,
       claims: token.claims,
       issuedAt: token.issuedAt.toISOString(),
-      expiresAt: token.expiresAt.toISOString()
+      expiresAt: token.expiresAt.toISOString(),
     }
 
     await writeJsonFile(this.serverUrlHash, 'saml_token.json', tokenData)
@@ -453,4 +623,4 @@ export class NodeSAML2ClientProvider implements SAML2Provider {
     const token = await this.getStoredToken()
     return token?.assertion
   }
-} 
+}

@@ -13,7 +13,11 @@ export type AuthCoordinator = {
 }
 
 export type SAML2AuthCoordinator = {
-  initializeSAMLAuth: () => Promise<{ server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean }>
+  initializeSAMLAuth: () => Promise<{
+    server: Server
+    waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>
+    skipBrowserAuth: boolean
+  }>
 }
 
 /**
@@ -171,7 +175,7 @@ export async function coordinateSAML2Auth(
   callbackPort: number,
   events: EventEmitter,
   acsPath: string = '/saml/acs',
-  slsPath: string = '/saml/sls'
+  slsPath: string = '/saml/sls',
 ): Promise<{ server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean }> {
   if (DEBUG) debugLog('Coordinating SAML2 authentication', { serverUrlHash, callbackPort, acsPath, slsPath })
 
@@ -313,13 +317,17 @@ export async function waitForSAML2Authentication(port: number): Promise<boolean>
 }
 
 export function createLazySAML2AuthCoordinator(
-  serverUrlHash: string, 
-  callbackPort: number, 
+  serverUrlHash: string,
+  callbackPort: number,
   events: EventEmitter,
   acsPath: string = '/saml/acs',
-  slsPath: string = '/saml/sls'
+  slsPath: string = '/saml/sls',
 ): SAML2AuthCoordinator {
-  let authState: { server: Server; waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>; skipBrowserAuth: boolean } | null = null
+  let authState: {
+    server: Server
+    waitForSAMLResponse: () => Promise<{ response: string; relayState?: string }>
+    skipBrowserAuth: boolean
+  } | null = null
 
   return {
     initializeSAMLAuth: async () => {

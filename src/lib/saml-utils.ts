@@ -98,11 +98,12 @@ export function setupSAML2CallbackServerWithLongPoll(options: SAML2CallbackServe
   app.post(options.slsPath, (req, res) => {
     const samlResponse = req.body.SAMLResponse as string | undefined
     const samlLogoutRequest = req.body.SAMLRequest as string | undefined
-    
-    if (DEBUG) debugLog('SAML logout request/response received', { 
-      hasResponse: !!samlResponse, 
-      hasRequest: !!samlLogoutRequest 
-    })
+
+    if (DEBUG)
+      debugLog('SAML logout request/response received', {
+        hasResponse: !!samlResponse,
+        hasRequest: !!samlLogoutRequest,
+      })
 
     // For logout, we just acknowledge and redirect
     res.send(`
@@ -121,9 +122,9 @@ export function setupSAML2CallbackServerWithLongPoll(options: SAML2CallbackServe
     `)
 
     // Emit logout event
-    options.events.emit('saml-logout-received', { 
-      response: samlResponse, 
-      request: samlLogoutRequest 
+    options.events.emit('saml-logout-received', {
+      response: samlResponse,
+      request: samlLogoutRequest,
     })
   })
 
@@ -163,4 +164,4 @@ export function setupSAML2CallbackServerWithLongPoll(options: SAML2CallbackServe
 export function setupSAML2CallbackServer(options: SAML2CallbackServerOptions) {
   const { server, samlResponseData, waitForSAMLResponse } = setupSAML2CallbackServerWithLongPoll(options)
   return { server, samlResponseData, waitForSAMLResponse }
-} 
+}

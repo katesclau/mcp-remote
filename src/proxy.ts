@@ -63,7 +63,7 @@ async function runProxy(
 
   if (authMode === 'saml2') {
     log('Using SAML2 authentication mode')
-    
+
     if (!saml2Options) {
       throw new Error('SAML2 options must be provided when using SAML2 authentication mode')
     }
@@ -83,7 +83,7 @@ async function runProxy(
     authProvider = createAuthProvider('saml2', undefined, rawAuthProvider)
   } else {
     log('Using OAuth authentication mode')
-    
+
     // Create OAuth auth coordinator
     authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
 
@@ -123,21 +123,24 @@ async function runProxy(
   }
 
   // Create MCP server
-  const mcpServer = new Server({
-    name: 'mcp-remote-proxy',
-    version: '1.0.0',
-  }, {
-    capabilities: {
-      resources: {},
-      tools: {},
-      prompts: {},
-      logging: {},
+  const mcpServer = new Server(
+    {
+      name: 'mcp-remote-proxy',
+      version: '1.0.0',
     },
-  })
+    {
+      capabilities: {
+        resources: {},
+        tools: {},
+        prompts: {},
+        logging: {},
+      },
+    },
+  )
 
   // Connect server to transport
   await mcpServer.connect(localTransport)
-  
+
   // Keep track of the server instances for cleanup
   let server: any = null
   let remoteTransport: any = null
@@ -166,29 +169,31 @@ async function runProxy(
 
     // Return unified interface for both auth types
     return {
-      waitForAuthCode: authMode === 'saml2' 
-        ? async () => {
-            const samlResponse = await authState.waitForSAMLResponse()
-            // For SAML2, we need to process the response and extract the assertion
-            if (typeof samlResponse === 'string') {
-              return samlResponse
-            } else {
-              // Process the SAML response to create and store the token
-              try {
-                const token = await rawAuthProvider.processResponse(samlResponse.response, samlResponse.relayState)
-                if (DEBUG) debugLog('SAML2 response processed successfully', {
-                  nameId: token.claims.nameId,
-                  expiresAt: token.expiresAt
-                })
-                // Return the assertion for the transport layer to use
-                return token.assertion
-              } catch (error) {
-                log('Failed to process SAML response:', error)
-                throw error
+      waitForAuthCode:
+        authMode === 'saml2'
+          ? async () => {
+              const samlResponse = await authState.waitForSAMLResponse()
+              // For SAML2, we need to process the response and extract the assertion
+              if (typeof samlResponse === 'string') {
+                return samlResponse
+              } else {
+                // Process the SAML response to create and store the token
+                try {
+                  const token = await rawAuthProvider.processResponse(samlResponse.response, samlResponse.relayState)
+                  if (DEBUG)
+                    debugLog('SAML2 response processed successfully', {
+                      nameId: token.claims.nameId,
+                      expiresAt: token.expiresAt,
+                    })
+                  // Return the assertion for the transport layer to use
+                  return token.assertion
+                } catch (error) {
+                  log('Failed to process SAML response:', error)
+                  throw error
+                }
               }
             }
-          }
-        : authState.waitForAuthCode,
+          : authState.waitForAuthCode,
       skipBrowserAuth: authState.skipBrowserAuth,
     }
   }

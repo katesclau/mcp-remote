@@ -67,10 +67,10 @@ export interface UnifiedAuthProvider {
   /** Get current access token/assertion for authorization */
   getCurrentToken(): Promise<string | undefined>
   /** Initialize authentication flow */
-  initializeAuth(): Promise<{ 
-    server: any; 
-    waitForAuth: () => Promise<string | { response: string; relayState?: string }>; 
-    skipBrowserAuth: boolean 
+  initializeAuth(): Promise<{
+    server: any
+    waitForAuth: () => Promise<string | { response: string; relayState?: string }>
+    skipBrowserAuth: boolean
   }>
   /** Get authentication URL for browser redirect */
   getAuthUrl?(relayState?: string): Promise<{ url: string; requestId: string }>

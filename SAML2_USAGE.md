@@ -51,42 +51,44 @@ npx tsx dist/proxy.js https://your-mcp-server.com 3334 \
 
 ### SAML2 Configuration File
 
-| Property | Type | Required | Description |
-|----------|------|----------|-------------|
-| `spEntityId` | string | Yes | Service Provider Entity ID |
-| `idpMetadata` | string | Yes* | IdP metadata URL or XML content |
-| `idpSsoUrl` | string | Yes* | IdP SSO URL (if metadata not provided) |
-| `idpEntityId` | string | Yes* | IdP Entity ID (if metadata not provided) |
-| `nameIdFormat` | string | No | NameID format (default: emailAddress) |
-| `signRequests` | boolean | No | Whether to sign SAML requests (default: false) |
-| `requireSignedAssertions` | boolean | No | Require signed assertions (default: false) |
-| `certificate` | string | Yes | SP certificate for SAML signing |
-| `privateKey` | string | Yes | SP private key for SAML signing |
-| `forceAuthn` | boolean | No | Force authentication (default: false) |
-| `allowIdpInitiated` | boolean | No | Allow IdP-initiated SSO (default: false) |
+| Property                  | Type    | Required | Description                                    |
+| ------------------------- | ------- | -------- | ---------------------------------------------- |
+| `spEntityId`              | string  | Yes      | Service Provider Entity ID                     |
+| `idpMetadata`             | string  | Yes\*    | IdP metadata URL or XML content                |
+| `idpSsoUrl`               | string  | Yes\*    | IdP SSO URL (if metadata not provided)         |
+| `idpEntityId`             | string  | Yes\*    | IdP Entity ID (if metadata not provided)       |
+| `nameIdFormat`            | string  | No       | NameID format (default: emailAddress)          |
+| `signRequests`            | boolean | No       | Whether to sign SAML requests (default: false) |
+| `requireSignedAssertions` | boolean | No       | Require signed assertions (default: false)     |
+| `certificate`             | string  | Yes      | SP certificate for SAML signing                |
+| `privateKey`              | string  | Yes      | SP private key for SAML signing                |
+| `forceAuthn`              | boolean | No       | Force authentication (default: false)          |
+| `allowIdpInitiated`       | boolean | No       | Allow IdP-initiated SSO (default: false)       |
 
-*Either `idpMetadata` OR (`idpSsoUrl` + `idpEntityId`) is required.
+\*Either `idpMetadata` OR (`idpSsoUrl` + `idpEntityId`) is required.
 
 ### Command Line Arguments
 
-| Argument | Description | Example |
-|----------|-------------|---------|
-| `--auth-mode` | Authentication mode: `oauth` or `saml2` | `--auth-mode saml2` |
+| Argument         | Description                             | Example                         |
+| ---------------- | --------------------------------------- | ------------------------------- |
+| `--auth-mode`    | Authentication mode: `oauth` or `saml2` | `--auth-mode saml2`             |
 | `--saml2-config` | SAML2 configuration file or JSON string | `--saml2-config @./config.json` |
-| `--host` | Callback hostname for SAML2 endpoints | `--host mcp-proxy.example.com` |
-| `--debug` | Enable debug logging | `--debug` |
+| `--host`         | Callback hostname for SAML2 endpoints   | `--host mcp-proxy.example.com`  |
+| `--debug`        | Enable debug logging                    | `--debug`                       |
 
 ## Identity Provider Setup
 
 ### Keycloak Configuration
 
 1. **Create SAML Client:**
+
    - Client Type: `SAML`
    - Client ID: `mcp-remote-saml-sp`
    - Valid Redirect URIs: `https://mcp-proxy.katesclau.dev/saml/acs`
    - Master SAML Processing URL: `https://mcp-proxy.katesclau.dev/saml/acs`
 
 2. **Configure SAML Settings:**
+
    - Include AuthnStatement: `ON`
    - Sign Documents: `ON`
    - Sign Assertions: `ON`
@@ -102,6 +104,7 @@ npx tsx dist/proxy.js https://your-mcp-server.com 3334 \
 ### Okta Configuration
 
 1. **Create SAML App:**
+
    - Single Sign On URL: `https://mcp-proxy.katesclau.dev/saml/acs`
    - Audience URI: `mcp-remote-saml-sp`
    - Name ID Format: `EmailAddress`
@@ -153,7 +156,7 @@ openssl rsa -in saml-private.key -out saml-private.pem
 mcp-remote provides these SAML2 endpoints:
 
 - `POST /saml/acs` - Assertion Consumer Service
-- `POST /saml/sls` - Single Logout Service  
+- `POST /saml/sls` - Single Logout Service
 - `GET /saml/metadata` - Service Provider metadata
 - `GET /wait-for-saml-auth` - Long-polling for multi-instance coordination
 
@@ -162,6 +165,7 @@ mcp-remote provides these SAML2 endpoints:
 ### Test with Keycloak
 
 1. **Start Keycloak:**
+
    ```bash
    docker run -p 9090:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
      quay.io/keycloak/keycloak:latest start-dev
@@ -194,14 +198,17 @@ cd mcp-remote
 ### Common Issues
 
 1. **Certificate Errors:**
+
    - Ensure certificate and private key are properly formatted
    - Verify certificate matches the one configured in IdP
 
 2. **Metadata Errors:**
+
    - Check IdP metadata URL is accessible
    - Verify IdP is properly configured
 
 3. **Callback Errors:**
+
    - Ensure callback URLs match in IdP configuration
    - Verify cloudflared tunnel is working (if using)
 
@@ -225,16 +232,19 @@ Debug logs are written to `~/.mcp-auth/{server_hash}_debug.log`.
 ## Security Considerations
 
 1. **Certificate Management:**
+
    - Keep private keys secure
    - Use strong certificates (2048+ bit RSA)
    - Rotate certificates regularly
 
 2. **Network Security:**
+
    - Use HTTPS for all endpoints
    - Validate SSL certificates
    - Ensure secure tunnel configuration
 
 3. **Token Security:**
+
    - SAML assertions are Base64-encoded (not encrypted)
    - Use signed assertions in production
    - Implement proper token expiration
@@ -246,15 +256,15 @@ Debug logs are written to `~/.mcp-auth/{server_hash}_debug.log`.
 
 ## Comparison: OAuth vs SAML2
 
-| Feature | OAuth2/OIDC | SAML2 |
-|---------|-------------|-------|
-| **Token Type** | JWT | Base64 SAML Assertion |
-| **Token Refresh** | Refresh tokens | Re-authentication |
-| **Complexity** | Medium | High |
-| **Enterprise Support** | Good | Excellent |
-| **Stateless** | Yes | Yes |
-| **Browser Required** | Yes | Yes |
-| **Multi-Instance** | Yes | Yes |
+| Feature                | OAuth2/OIDC    | SAML2                 |
+| ---------------------- | -------------- | --------------------- |
+| **Token Type**         | JWT            | Base64 SAML Assertion |
+| **Token Refresh**      | Refresh tokens | Re-authentication     |
+| **Complexity**         | Medium         | High                  |
+| **Enterprise Support** | Good           | Excellent             |
+| **Stateless**          | Yes            | Yes                   |
+| **Browser Required**   | Yes            | Yes                   |
+| **Multi-Instance**     | Yes            | Yes                   |
 
 ## Examples
 
@@ -284,4 +294,4 @@ npx tsx dist/proxy.js https://api.example.com \
   --saml2-config '{"spEntityId":"my-sp","idpMetadata":"https://idp.com/metadata"}'
 ```
 
-This implementation provides a complete, production-ready SAML2 authentication system for mcp-remote that maintains the same stateless architecture as the existing OAuth2 implementation. 
+This implementation provides a complete, production-ready SAML2 authentication system for mcp-remote that maintains the same stateless architecture as the existing OAuth2 implementation.
