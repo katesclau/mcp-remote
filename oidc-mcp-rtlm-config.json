@@ -1,0 +1,14 @@
+{
+  "issuer": "http://localhost:9090/realms/mcp-rtlm",
+  "clientId": "mcp-remote-oidc",
+  "clientSecret": "",
+  "redirectUri": "http://localhost:3334/callback",
+  "scopes": ["openid", "profile", "email", "groups"],
+  "authorizationEndpoint": "http://localhost:9090/realms/mcp-rtlm/protocol/openid-connect/auth",
+  "tokenEndpoint": "http://localhost:9090/realms/mcp-rtlm/protocol/openid-connect/token",
+  "userinfoEndpoint": "http://localhost:9090/realms/mcp-rtlm/protocol/openid-connect/userinfo",
+  "jwksUri": "http://localhost:9090/realms/mcp-rtlm/protocol/openid-connect/certs",
+  "responseType": "code",
+  "grantType": "authorization_code",
+  "codeChallengeMethod": "S256"
+} 
